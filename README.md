@@ -1,4 +1,4 @@
-# Nutriproteomics
+# Nutriproteomics GWAS
 
 **Transformation of the proteomic markers**
 
