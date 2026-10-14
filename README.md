@@ -1,69 +1,96 @@
 # Nutriproteomics GWAS
 
-**Transformation of the proteomic markers**
+Genome-wide association analysis of four nutrient pattern proteomic scores
+(plant-driven, animal-driven, vitamin C/sugar-driven and retinol/vitamin B12-driven)
+using fastGWA-MLM in [GCTA](https://yanglab.westlake.edu.cn/software/gcta/).
 
-Regress nutrient pattern proteomic scores with appropriate covariates, including age, sex, and genetic principal components. Inverse rank normalize the residuals and uses the transformed phenotype as the outcome variable or phenotype for  GWAS. The following R commands can be used to transform your trait.Regress nutrient pattern proteomic scores with appropriate covariates, including age, sex, and genetic principal components. Inverse rank normalize the residuals and uses the transformed phenotype as the outcome variable or phenotype for  GWAS. The following R commands can be used to transform your trait.
+## Pipeline
 
-```R
-#Regress nutrient proteomic scores with select covariates (separately for the four nutrient pattern proteomic score)
+| Step | Script | Output |
+|------|--------|--------|
+| 1. Transform phenotypes | `scripts/01_transform_phenotypes.R` | `pheno/pheno{plant,animal,vitc,retinol}.txt`, `pheno/qcovar.txt`, `pheno/covar.txt` |
+| 2. Run GWAS | `scripts/02_run_fastgwa.sh` | `gwas/sparse_grm.*`, `gwas/<pheno>.fastGWA` |
+| 3. Summarise | `scripts/03_gwas_summary.R` | genomic inflation (lambda), `gwas/<pheno>_qq.png`, `gwas/<pheno>_manhattan.png` |
 
-plantdrivenlm <-lm(plantdriven ~ PC1 + PC2 + PC3 + PC4 + PC5 + age, data=DATASET)
-animaldrivenlm <-lm(animaldriven ~ PC1 + PC2 + PC3 + PC4 + PC5 + age, data=DATASET)
-vitamicsugardrivenlm <- lm(vitaminCsugar ~ PC1 + PC2 + PC3 + PC4 + PC5 + age +sex,data=DATASET)
-retinolvitB12drivenlm <- lm(vitaminCsugar ~ PC1 + PC2 + PC3 + PC4 + PC5 + age +sex,data=DATASET)
+Requirements: R (base packages only) and GCTA 1.94.1.
 
-#Extract residuals and add them to your dataset
-
-DATASET$residualsplant = plantdrivenlm$residuals
-DATASET$residualsanimal = animaldrivenlm$residuals
-DATASET$residualsvitC = vitamicsugardrivenlm$residuals
-DATASET$residualsretinol = retinolvitB12drivenlm$residuals
-
-#Inverse rank normalizes the residuals and renames them as pheno for GWAS analysis
-
-DATASET$phenoplant <- qnorm((rank(DATASET$residualsplant,na.last="keep") -0.5)/sum(!is.na(DATASET$residualsplant)))
-DATASET$phenoanimal <- qnorm((rank(DATASET$residualsanimal,na.last="keep") - 0.5)/sum(!is.na(DATASET$residualsanimal)))
-DATASET$phenovitC <- qnorm((rank(DATASET$residualsvitc,na.last="keep") -0.5)/sum(!is.na(DATASET$residualsvitc)))
-DATASET$phenoretinol <- qnorm((rank(DATASET$residualsretinol,na.last="keep") -0.5)/sum(!is.na(DATASET$residualsretinol)))
-```
-
-**GWAS analysis using FastGWA**
-
-```Bash
-
-#Download the Fastgwas executable from link below
-
+```bash
 wget https://yanglab.westlake.edu.cn/software/gcta/bin/gcta-1.94.1-linux-kernel-3-x86_64.zip
 unzip gcta-1.94.1-linux-kernel-3-x86_64.zip
+```
 
-#Make sure you genotype data is in plink formart and use the Fastgwas to run the GWAS as indicated below
+## 1. Transforming the proteomic scores
 
-#Define the location of the Fastgwas executable as SOFT and the genotype data as DATA
-DATA=/dataE/AWIGenGWAS/shared/imputed_data_plink
+Each score is regressed on age, sex and the first 10 genetic principal components.
+The residuals are inverse rank normalised and written as GCTA phenotype files
+(`FID IID value`, no header).
 
-SOFT=/home/tinashe/GCTA/gcta-1.94.1-linux-kernel-3-x86_64/gcta-1.94.1
+```bash
+Rscript scripts/01_transform_phenotypes.R DATASET.tsv pheno
+```
 
-#Make a sparse genetic related matrix
+`DATASET.tsv` (tab- or whitespace-separated; `.csv` also accepted) needs one row per
+individual with these columns:
 
-$SOFT --bfile $DATA/all_imputed_map_qc --make-grm --sparse-cutoff 0.05 --thread-num 20 --out assp_grm
+| Column | Description |
+|--------|-------------|
+| `FID`, `IID` | Family and individual IDs, matching the PLINK `.fam` file |
+| `age` | Age in years |
+| `sex` | Sex (treated as categorical) |
+| `PC1` … `PC10` | Genetic principal components |
+| `plantdriven`, `animaldriven`, `vitaminCsugar`, `retinolvitB12` | Nutrient pattern proteomic scores |
 
-#Run the GWAS as shown below
+Column names, the number of PCs and the covariate set are defined at the top of the script.
+Missing values are allowed: `lm(..., na.action = na.exclude)` keeps the residuals
+aligned with their individuals, and those individuals get `NA` in the phenotype file.
 
-$SOFT --bfile $DATA/all_imputed_map_qc --grm-sparse assp_grm --fastGWA-mlm --pheno phenoplant --thread-num 20 --out plant
+The core of the transformation, for one score:
 
-$SOFT --bfile $DATA/all_imputed_map_qc --grm-sparse assp_grm --fastGWA-mlm --pheno phenoanimal --thread-num 20 --out animal
+```R
+fit <- lm(plantdriven ~ age + sex + PC1 + ... + PC10, data = DATASET, na.action = na.exclude)
+DATASET$residualsplant <- residuals(fit)
+DATASET$phenoplant <- qnorm((rank(DATASET$residualsplant, na.last = "keep") - 0.5) /
+                            sum(!is.na(DATASET$residualsplant)))
+```
 
-$SOFT --bfile $DATA/all_imputed_map_qc --grm-sparse assp_grm --fastGWA-mlm --pheno phenovitc --thread-num 20 --out vitc
+## 2. GWAS with fastGWA-MLM
 
-$SOFT --bfile $DATA/all_imputed_map_qc --grm-sparse assp_grm --fastGWA-mlm --pheno phenoretinol --thread-num 20 --out retinol
+The genotype data must be in PLINK binary format. Configure the run with environment variables:
 
+```bash
+GCTA=/path/to/gcta-1.94.1 \
+BFILE=/path/to/all_imputed_map_qc \
+THREADS=20 \
+GRM_SNPS=pruned_genotyped.snplist \
+bash scripts/02_run_fastgwa.sh
+```
 
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GCTA` | `gcta-1.94.1` | GCTA executable |
+| `BFILE` | required | PLINK genotype prefix |
+| `PHENO_DIR` | `pheno` | Output of step 1 |
+| `OUT_DIR` | `gwas` | Results directory |
+| `THREADS` | `20` | Threads |
+| `GRM_SNPS` | none | Optional SNP list for the GRM; LD-pruned, genotyped SNPs are recommended over all imputed SNPs |
+| `GRM_MAF` | `0.01` | MAF filter for SNPs in the GRM |
+| `SPARSE_CUTOFF` | `0.05` | Relatedness cutoff for the sparse GRM |
+| `GWAS_MAF` | `0.01` | MAF filter for tested SNPs |
+| `GWAS_GENO` | `0.05` | Maximum per-SNP missingness for tested SNPs |
 
+The script builds a sparse GRM once and then runs fastGWA-MLM for each phenotype.
+Age, PCs (`--qcovar`) and sex (`--covar`) are included again at the GWAS stage.
+Inverse normalising residuals and then testing without covariates can lose power and
+bias effect estimates (Sofer et al., 2019, *Genet Epidemiol* 43:263–275).
 
+Filter imputed variants on imputation quality (e.g. INFO/R² ≥ 0.3) before creating the
+PLINK files, or use dosages directly with GCTA's `--bgen`/`--mbgen` options.
 
+## 3. Summarising results
 
+```bash
+Rscript scripts/03_gwas_summary.R gwas
+```
 
-
-
-
-
+This reports the genomic inflation factor (lambda) and the number of genome-wide significant
+SNPs (P < 5e-8) for each phenotype, and saves QQ and Manhattan plots.
